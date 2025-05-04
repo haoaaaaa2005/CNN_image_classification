@@ -19,7 +19,7 @@ CLASSES = [
 NUM_CLASSES = len(CLASSES)
 BATCH_SIZE = 32
 LEARNING_RATE = 1e-3
-NUM_EPOCHS = 1
+NUM_EPOCHS = 20
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.2
 TEST_RATIO = 0.1
@@ -162,6 +162,15 @@ plt.xlabel('Epoch'); plt.ylabel('Score'); plt.title('Validation Metrics'); plt.l
 
 if roc_data:
     fpr, tpr = roc_data
+    plt.figure(figsize=(10, 8))
     for idx, name in enumerate(CLASSES):
-        plt.figure(); plt.plot(fpr[idx].cpu(), tpr[idx].cpu(), label=f'ROC {name}')
-        plt.xlabel('FPR'); plt.ylabel('TPR'); plt.title(f'ROC Curve: {name}'); plt.legend(); plt.show()
+        plt.plot(fpr[idx].cpu(), tpr[idx].cpu(), label=name)
+    plt.plot([0, 1], [0, 1], 'k--', label='Random Guess')  # 对角线
+    plt.xlabel('False Positive Rate (FPR)')
+    plt.ylabel('True Positive Rate (TPR)')
+    plt.title('Multiclass ROC Curve')
+    plt.legend(loc='lower right', fontsize='small', ncol=2)  # 可调整图例样式
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
