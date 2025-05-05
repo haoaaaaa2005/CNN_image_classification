@@ -160,7 +160,7 @@ plt.plot(range(1,NUM_EPOCHS+1), val_recs, label='Val Rec')
 plt.plot(range(1,NUM_EPOCHS+1), val_f1s, label='Val F1')
 plt.xlabel('Epoch'); plt.ylabel('Score'); plt.title('Validation Metrics'); plt.legend(); plt.show()
 
-if roc_data:
+if roc_data: #
     fpr, tpr = roc_data
     plt.figure(figsize=(10, 8))
     for idx, name in enumerate(CLASSES):
