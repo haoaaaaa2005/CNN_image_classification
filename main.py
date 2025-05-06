@@ -28,7 +28,16 @@ TEST_RATIO = 0.1
 IMAGE_SIZE = (224, 224)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 PATIENCE = 5  # Early stopping patience
-MODEL_SAVE_PATH = 'best_resnet50.pth'
+MODEL_SAVE_PATH = 'best_model.pth'
+
+# ===== Normalization Parameters =====
+NORMALIZE_MEAN = [0.485, 0.456, 0.406]
+NORMALIZE_STD  = [0.229, 0.224, 0.225]
+
+# ===== Available Model Types =====
+MODEL_TYPES = ['SimpleCNN', 'ResNet18', 'ResNet50', 'EfficientNet_B1', 'AlexNet']
+# Choose model by name from MODEL_TYPES
+MODEL_TYPE = 'ResNet50'
 
 # ===== Dataset Definition =====
 class ChineseMedicineDataset(Dataset):
@@ -55,7 +64,7 @@ transform = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
     transforms.RandomHorizontalFlip(),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
+    transforms.Normalize(mean=NORMALIZE_MEAN, std=NORMALIZE_STD)
 ])
 
 dataset = ChineseMedicineDataset(DATA_DIR, CLASSES, transform)
@@ -75,19 +84,47 @@ train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
 val_loader   = DataLoader(val_set,   batch_size=BATCH_SIZE, shuffle=False)
 test_loader  = DataLoader(test_set,  batch_size=BATCH_SIZE, shuffle=False)
 
-# ===== Model Definition: ResNet50 =====
-model = models.resnet50(pretrained=True)
-# Replace the final fully-connected layer
-def set_resnet_classifier(model, num_classes):
-    in_features = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(0.5),
-        nn.Linear(in_features, num_classes)
-    )
-    return model
+# ===== Model Selection =====
 
-model = set_resnet_classifier(model, NUM_CLASSES).to(DEVICE)
+def get_model(model_type, num_classes):
+    if model_type == 'SimpleCNN':
+        class SimpleCNN(nn.Module):
+            def __init__(self, num_classes):
+                super(SimpleCNN, self).__init__()
+                self.features = nn.Sequential(
+                    nn.Conv2d(3, 32, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                    nn.Conv2d(32, 64, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                    nn.Conv2d(64,128, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                )
+                self.classifier = nn.Sequential(
+                    nn.Flatten(),
+                    nn.Linear(128 * (IMAGE_SIZE[0]//8) * (IMAGE_SIZE[1]//8), 256),
+                    nn.ReLU(), nn.Dropout(0.5), nn.Linear(256, num_classes)
+                )
+            def forward(self, x):
+                return self.classifier(self.features(x))
+        return SimpleCNN(num_classes)
 
+    elif model_type in ['ResNet18', 'ResNet50', 'AlexNet']:
+        model = getattr(models, model_type.lower() if model_type!='ResNet50' else 'resnet50')(pretrained=True)
+        if model_type == 'AlexNet':
+            in_features = model.classifier[-1].in_features
+            model.classifier[-1] = nn.Linear(in_features, num_classes)
+        else:
+            in_features = model.fc.in_features
+            model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, num_classes))
+        return model
+
+    elif model_type == 'EfficientNet_B1':
+        model = models.efficientnet_b1(pretrained=True)
+        in_features = model.classifier[1].in_features
+        model.classifier[1] = nn.Linear(in_features, num_classes)
+        return model
+
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
+
+model = get_model(MODEL_TYPE, NUM_CLASSES).to(DEVICE)
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 criterion = nn.CrossEntropyLoss()
 
