@@ -18,6 +18,8 @@ CLASSES = [
 ]
 NUM_CLASSES = len(CLASSES)
 BATCH_SIZE = 32
+KERNEL_SIZE = 3
+PADDING_MODE = 'zeros' # 还有 'reflect' 'replicate' 'circular' 可供选择
 LEARNING_RATE = 1e-3
 NUM_EPOCHS = 20
 TRAIN_RATIO = 0.7
@@ -76,9 +78,9 @@ class SimpleCNN(nn.Module):
     def __init__(self, num_classes):
         super(SimpleCNN, self).__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(64,128, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(3, 32, kernel_size=KERNEL_SIZE, padding=PADDING_MODE), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=KERNEL_SIZE, padding=PADDING_MODE), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(64,128, kernel_size=KERNEL_SIZE, padding=PADDING_MODE), nn.ReLU(), nn.MaxPool2d(2),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
