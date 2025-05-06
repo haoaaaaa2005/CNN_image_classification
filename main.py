@@ -9,6 +9,8 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import torchvision.transforms as transforms
 from torchvision import models
 import matplotlib.pyplot as plt
+import gradio as gr  # 引入 Gradio
+from io import BytesIO
 from torchmetrics.classification import Precision, Recall, F1Score, MulticlassROC
 
 # ===== Global Hyperparameters and Paths =====
@@ -19,25 +21,10 @@ CLASSES = [
     'hongteng','aiye','jingjie','jinyinhua','huangbai','huangqi'
 ]
 NUM_CLASSES = len(CLASSES)
-BATCH_SIZE = 32
-LEARNING_RATE = 1e-3
-NUM_EPOCHS = 20
-TRAIN_RATIO = 0.7
-VAL_RATIO = 0.2
-TEST_RATIO = 0.1
-IMAGE_SIZE = (224, 224)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-PATIENCE = 5  # Early stopping patience
-MODEL_SAVE_PATH = 'best_model.pth'
-
-# ===== Normalization Parameters =====
-NORMALIZE_MEAN = [0.485, 0.456, 0.406]
-NORMALIZE_STD  = [0.229, 0.224, 0.225]
 
 # ===== Available Model Types =====
 MODEL_TYPES = ['SimpleCNN', 'ResNet18', 'ResNet50', 'EfficientNet_B1', 'AlexNet']
-# Choose model by name from MODEL_TYPES
-MODEL_TYPE = 'ResNet50'
 
 # ===== Dataset Definition =====
 class ChineseMedicineDataset(Dataset):
@@ -59,192 +46,148 @@ class ChineseMedicineDataset(Dataset):
             image = self.transform(image)
         return image, label
 
-# ===== Transforms and DataLoader =====
-transform = transforms.Compose([
-    transforms.Resize(IMAGE_SIZE),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=NORMALIZE_MEAN, std=NORMALIZE_STD)
-])
-
-dataset = ChineseMedicineDataset(DATA_DIR, CLASSES, transform)
-if len(dataset) == 0:
-    raise RuntimeError(f"No images found in {DATA_DIR}. Please check the path.")
-
-total = len(dataset)
-train_size = int(TRAIN_RATIO * total)
-val_size   = int(VAL_RATIO * total)
-test_size  = total - train_size - val_size
-train_set, val_set, test_set = random_split(
-    dataset, [train_size, val_size, test_size],
-    generator=torch.Generator().manual_seed(42)
-)
-
-train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
-val_loader   = DataLoader(val_set,   batch_size=BATCH_SIZE, shuffle=False)
-test_loader  = DataLoader(test_set,  batch_size=BATCH_SIZE, shuffle=False)
-
-# ===== Model Selection =====
-
+# ===== Model Factory =====
 def get_model(model_type, num_classes):
     if model_type == 'SimpleCNN':
         class SimpleCNN(nn.Module):
             def __init__(self, num_classes):
                 super(SimpleCNN, self).__init__()
                 self.features = nn.Sequential(
-                    nn.Conv2d(3, 32, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-                    nn.Conv2d(32, 64, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-                    nn.Conv2d(64,128, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+                    nn.Conv2d(3,32,3,1,1), nn.ReLU(), nn.MaxPool2d(2),
+                    nn.Conv2d(32,64,3,1,1), nn.ReLU(), nn.MaxPool2d(2),
+                    nn.Conv2d(64,128,3,1,1), nn.ReLU(), nn.MaxPool2d(2)
                 )
                 self.classifier = nn.Sequential(
                     nn.Flatten(),
                     nn.Linear(128 * (IMAGE_SIZE[0]//8) * (IMAGE_SIZE[1]//8), 256),
-                    nn.ReLU(), nn.Dropout(0.5), nn.Linear(256, num_classes)
+                    nn.ReLU(), nn.Dropout(0.5),
+                    nn.Linear(256, num_classes)
                 )
-            def forward(self, x):
-                return self.classifier(self.features(x))
+            def forward(self, x): return self.classifier(self.features(x))
         return SimpleCNN(num_classes)
-
-    elif model_type in ['ResNet18', 'ResNet50', 'AlexNet']:
-        model = getattr(models, model_type.lower() if model_type!='ResNet50' else 'resnet50')(pretrained=True)
+    else:
+        name_map = {'ResNet18':'resnet18','ResNet50':'resnet50','EfficientNet_B1':'efficientnet_b1','AlexNet':'alexnet'}
+        name = name_map.get(model_type)
+        model = getattr(models, name)(pretrained=True)
         if model_type == 'AlexNet':
-            in_features = model.classifier[-1].in_features
-            model.classifier[-1] = nn.Linear(in_features, num_classes)
+            in_f = model.classifier[-1].in_features
+            model.classifier[-1] = nn.Linear(in_f, num_classes)
+        elif model_type == 'EfficientNet_B1':
+            in_f = model.classifier[1].in_features
+            model.classifier[1] = nn.Linear(in_f, num_classes)
         else:
-            in_features = model.fc.in_features
-            model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_features, num_classes))
+            in_f = model.fc.in_features
+            model.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(in_f, num_classes))
         return model
 
-    elif model_type == 'EfficientNet_B1':
-        model = models.efficientnet_b1(pretrained=True)
-        in_features = model.classifier[1].in_features
-        model.classifier[1] = nn.Linear(in_features, num_classes)
-        return model
+# ===== Main function for Gradio =====
+def train_and_plot(batch_size, lr, epochs, train_ratio, val_ratio, test_ratio,
+                   image_size, patience,
+                   mean_r, mean_g, mean_b,
+                   std_r, std_g, std_b,
+                   model_type):
+    global IMAGE_SIZE
+    IMAGE_SIZE = (int(image_size), int(image_size))
+    NORMALIZE_MEAN = [float(mean_r), float(mean_g), float(mean_b)]
+    NORMALIZE_STD  = [float(std_r),  float(std_g),  float(std_b)]
+    MODEL_SAVE_PATH = 'best_model.pth'
 
-    else:
-        raise ValueError(f"Unsupported model type: {model_type}")
+    # 数据准备
+    transform = transforms.Compose([
+        transforms.Resize(IMAGE_SIZE),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=NORMALIZE_MEAN, std=NORMALIZE_STD)
+    ])
+    dataset = ChineseMedicineDataset(DATA_DIR, CLASSES, transform)
+    total = len(dataset)
+    tr, vr = float(train_ratio), float(val_ratio)
+    train_size = int(tr * total)
+    val_size   = int(vr * total)
+    test_size  = total - train_size - val_size
+    train_set, val_set, test_set = random_split(dataset, [train_size, val_size, test_size],
+                                                 generator=torch.Generator().manual_seed(42))
+    train_loader = DataLoader(train_set, batch_size=int(batch_size), shuffle=True)
+    val_loader   = DataLoader(val_set,   batch_size=int(batch_size), shuffle=False)
+    test_loader  = DataLoader(test_set,  batch_size=int(batch_size), shuffle=False)
 
-model = get_model(MODEL_TYPE, NUM_CLASSES).to(DEVICE)
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-criterion = nn.CrossEntropyLoss()
+    # 模型、优化器、损失
+    device = DEVICE
+    model = get_model(model_type, NUM_CLASSES).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=float(lr))
+    criterion = nn.CrossEntropyLoss()
 
-# ===== Metrics =====
-precision_metric = Precision(task='multiclass', num_classes=NUM_CLASSES, average='macro').to(DEVICE)
-recall_metric    = Recall(task='multiclass', num_classes=NUM_CLASSES, average='macro').to(DEVICE)
-f1_metric        = F1Score(task='multiclass', num_classes=NUM_CLASSES, average='macro').to(DEVICE)
-roc_metric       = MulticlassROC(num_classes=NUM_CLASSES).to(DEVICE)
+    # Early Stopping
+    best_val_loss = float('inf'); patience_counter = 0
 
-# ===== Training and Evaluation =====
-def train_one_epoch(loader):
-    model.train()
-    running_loss = 0.0
-    for images, labels in loader:
-        images, labels = images.to(DEVICE), labels.to(DEVICE)
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item() * images.size(0)
-    return running_loss / len(loader.dataset)
+    # 训练与验证
+    train_losses, val_losses = [], []
+    for epoch in range(1, int(epochs) + 1):
+        model.train(); running_loss = 0
+        for imgs, lbls in train_loader:
+            imgs, lbls = imgs.to(device), lbls.to(device)
+            optimizer.zero_grad(); out = model(imgs)
+            loss = criterion(out, lbls); loss.backward(); optimizer.step()
+            running_loss += loss.item() * imgs.size(0)
+        train_losses.append(running_loss / len(train_loader.dataset))
 
+        model.eval(); val_loss = 0
+        with torch.no_grad():
+            for imgs, lbls in val_loader:
+                imgs, lbls = imgs.to(device), lbls.to(device)
+                val_loss += criterion(model(imgs), lbls).item() * imgs.size(0)
+        val_losses.append(val_loss / len(val_loader.dataset))
 
-def evaluate(loader, compute_roc=False):
-    model.eval()
-    all_probs, all_labels = [], []
-    with torch.no_grad():
-        for images, labels in loader:
-            images = images.to(DEVICE)
-            probs  = torch.softmax(model(images), dim=1)
-            all_probs.append(probs)
-            all_labels.append(labels)
-    all_probs  = torch.cat(all_probs)
-    all_labels = torch.cat(all_labels).to(DEVICE)
-    preds      = torch.argmax(all_probs, dim=1)
+        if val_losses[-1] < best_val_loss:
+            best_val_loss = val_losses[-1]
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= int(patience):
+                break
 
-    acc  = (preds == all_labels).float().mean().item()
-    prec = precision_metric(preds, all_labels).item()
-    rec  = recall_metric(preds, all_labels).item()
-    f1   = f1_metric(preds, all_labels).item()
-    roc_data = None
-    if compute_roc:
-        fpr, tpr, _ = roc_metric(all_probs, all_labels)
-        roc_data    = (fpr, tpr)
-    return acc, prec, rec, f1, roc_data
+    # 绘图
+    buf = BytesIO()
+    plt.figure(); plt.plot(train_losses, label='Train Loss'); plt.plot(val_losses, label='Val Loss'); plt.legend()
+    plt.savefig(buf, format='png'); plt.close(); buf.seek(0)
+    return buf
 
-# ===== Main Training Loop with Early Stopping =====
-best_val_loss = float('inf')
-patience_counter = 0
-train_losses, val_losses = [], []
-val_metrics = []
+# ===== Gradio UI =====
+with gr.Blocks() as demo:
+    gr.Markdown("## 中药图像分类模型训练与可视化")
+    with gr.Row():
+        with gr.Column():
+            model_box = gr.Dropdown(choices=MODEL_TYPES, value='ResNet50', label='Model Type')
+            batch_box = gr.Slider(1, 128, value=32, label='Batch Size')
+            lr_box    = gr.Number(value=1e-3, label='Learning Rate')
+            epochs_box= gr.Slider(1, 100, value=20, step=1, label='Num Epochs')
+            train_r   = gr.Slider(0.1, 0.9, value=0.7, step=0.05, label='Train Ratio')
+            val_r     = gr.Slider(0.1, 0.5, value=0.2, step=0.05, label='Val Ratio')
+            test_r    = gr.Slider(0.05, 0.5, value=0.1, step=0.05, label='Test Ratio')
+            img_size  = gr.Slider(64, 512, value=224, step=32, label='Image Size')
+            patience  = gr.Slider(1, 20, value=5, step=1, label='Early Stopping Patience')
+            # 一级菜单展示但不调整
+            with gr.Accordion("Normalize Parameters", open=True):
+                gr.Markdown("**Current Mean:** R={0}, G={1}, B={2}".format(0.485,0.456,0.406))
+                gr.Markdown("**Current Std:** R={0}, G={1}, B={2}".format(0.229,0.224,0.225))
+            # 二级菜单可调整
+            with gr.Accordion("Adjust Normalize Mean/Std", open=False):
+                mean_r    = gr.Slider(0.0, 1.0, value=0.485, step=0.001, label='Mean R')
+                mean_g    = gr.Slider(0.0, 1.0, value=0.456, step=0.001, label='Mean G')
+                mean_b    = gr.Slider(0.0, 1.0, value=0.406, step=0.001, label='Mean B')
+                std_r     = gr.Slider(0.0, 1.0, value=0.229, step=0.001, label='Std R')
+                std_g     = gr.Slider(0.0, 1.0, value=0.224, step=0.001, label='Std G')
+                std_b     = gr.Slider(0.0, 1.0, value=0.225, step=0.001, label='Std B')
+            run_btn = gr.Button('Run Training', loading='Running')  # Changed: 点击按钮后显示 'Running'
+        with gr.Column():
+            output_img = gr.Image(type='pil', label='Loss Curve')
+    run_btn.click(fn=train_and_plot,
+                  inputs=[batch_box, lr_box, epochs_box, train_r, val_r, test_r,
+                          img_size, patience,
+                          mean_r, mean_g, mean_b,
+                          std_r, std_g, std_b,
+                          model_box],
+                  outputs=output_img)
 
-for epoch in range(1, NUM_EPOCHS+1):
-    t_loss = train_one_epoch(train_loader)
-    train_losses.append(t_loss)
-
-    # Compute validation loss separately
-    model.eval()
-    val_running_loss = 0.0
-    with torch.no_grad():
-        for images, labels in val_loader:
-            images, labels = images.to(DEVICE), labels.to(DEVICE)
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            val_running_loss += loss.item() * images.size(0)
-    v_loss = val_running_loss / len(val_loader.dataset)
-    val_losses.append(v_loss)
-
-    v_acc, v_prec, v_rec, v_f1, _ = evaluate(val_loader)
-    val_metrics.append((v_acc, v_prec, v_rec, v_f1))
-
-    print(f"Epoch {epoch}/{NUM_EPOCHS} "
-          f"Train Loss: {t_loss:.4f} "
-          f"Val Loss: {v_loss:.4f} "
-          f"Val Acc: {v_acc:.4f} "
-          f"Val F1: {v_f1:.4f}")
-
-    # Early Stopping & Save Best Model
-    if v_loss < best_val_loss:
-        best_val_loss = v_loss
-        torch.save(model.state_dict(), MODEL_SAVE_PATH)
-        print(f"  > New best model saved with Val Loss: {v_loss:.4f}")
-        patience_counter = 0
-    else:
-        patience_counter += 1
-        if patience_counter >= PATIENCE:
-            print(f"Early stopping triggered. No improvement in {PATIENCE} epochs.")
-            break
-
-# ===== Load Best Model and Final Test Evaluation =====
-model.load_state_dict(torch.load(MODEL_SAVE_PATH))
-t_acc, t_prec, t_rec, t_f1, roc_data = evaluate(test_loader, compute_roc=True)
-print(f"Test Acc: {t_acc:.4f} Prec: {t_prec:.4f} Rec: {t_rec:.4f} F1: {t_f1:.4f}")
-
-# ===== Visualization =====
-plt.figure(); plt.plot(range(1,len(train_losses)+1), train_losses, label='Train Loss')
-plt.plot(range(1,len(val_losses)+1), val_losses, label='Val Loss')
-plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Loss Curve')
-plt.legend(); plt.show()
-
-val_accs, val_precs, val_recs, val_f1s = zip(*val_metrics)
-plt.figure();
-plt.plot(range(1,len(val_accs)+1), val_accs, label='Val Acc')
-plt.plot(range(1,len(val_precs)+1), val_precs, label='Val Prec')
-plt.plot(range(1,len(val_recs)+1), val_recs, label='Val Rec')
-plt.plot(range(1,len(val_f1s)+1), val_f1s, label='Val F1')
-plt.xlabel('Epoch'); plt.ylabel('Score'); plt.title('Validation Metrics')
-plt.legend(); plt.show()
-
-if roc_data:
-    fpr, tpr = roc_data
-    plt.figure(figsize=(10, 8))
-    for idx, name in enumerate(CLASSES):
-        plt.plot(fpr[idx].cpu(), tpr[idx].cpu(), label=name)
-    plt.plot([0, 1], [0, 1], 'k--', label='Random Guess')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Multiclass ROC Curve')
-    plt.legend(loc='lower right', fontsize='small', ncol=2)
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    demo.launch()  # 启动 Gradio UI
